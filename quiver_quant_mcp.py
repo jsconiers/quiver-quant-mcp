@@ -27,9 +27,12 @@ Verbose logs:  DEBUG=true uv run quiver_quant_mcp.py
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import re
 import sys
+import time
 from pathlib import Path
 from typing import Annotated, Any, Optional
 
@@ -113,21 +116,53 @@ async def _get(path: str, params: Optional[dict] = None) -> Any:
         raise QuiverError(f"Invalid JSON from {path}") from exc
 
 
+_RANGE_RE = re.compile(r"\$?([\d,]+(?:\.\d+)?)\s*-\s*\$?([\d,]+(?:\.\d+)?)")
+
+
+def _parse_range(val: str):
+    """Parse a Quiver dollar range like '$1,001 - $15,000' into numeric min/max/mid. None if unparseable."""
+    m = _RANGE_RE.search(val)
+    if not m:
+        return None
+    try:
+        lo = float(m.group(1).replace(",", ""))
+        hi = float(m.group(2).replace(",", ""))
+    except ValueError:
+        return None
+    return {"amountMin": lo, "amountMax": hi, "amountMid": round((lo + hi) / 2, 2)}
+
+
 def _result(dataset: str, data: Any, limit: Optional[int], **extra) -> dict:
     if isinstance(data, list):
         trimmed = data[:limit] if limit else data
+        for row in trimmed:
+            if isinstance(row, dict) and isinstance(row.get("Range"), str) and "amountMid" not in row:
+                parsed = _parse_range(row["Range"])
+                if parsed:
+                    row.update(parsed)
         return {"dataset": dataset, "count": len(trimmed), "total": len(data),
                 **extra, "data": trimmed}
     return {"dataset": dataset, **extra, "data": data}
 
 
+_CACHE_TTL = 60.0
+_resp_cache: dict = {}
+
+
 async def _fetch(dataset: str, path: str, params: Optional[dict], limit: Optional[int]) -> dict:
-    """Fetch + wrap; convert QuiverError into a structured error dict (don't raise)."""
+    """Fetch + wrap; convert QuiverError into a structured error dict (don't raise). Cached ~60s."""
+    key = (path, tuple(sorted(params.items())) if params else None, limit)
+    now = time.monotonic()
+    hit = _resp_cache.get(key)
+    if hit and (now - hit[1]) < _CACHE_TTL:
+        return hit[0]
     try:
         data = await _get(path, params)
     except QuiverError as exc:
         return {"dataset": dataset, "error": str(exc)}
-    return _result(dataset, data, limit)
+    res = _result(dataset, data, limit)
+    _resp_cache[key] = (res, now)
+    return res
 
 
 # ---------------------------------------------------------------------------
@@ -157,7 +192,11 @@ async def quiver_status() -> dict:
             "wallstreetbets_recent", "wallstreetbets_by_ticker",
             "offexchange_recent", "offexchange_by_ticker",
             "sec13f_changes_recent", "house_trading_recent",
-            "senate_trading_recent",
+            "senate_trading_recent", "twitter_followers_recent",
+            "twitter_followers_by_ticker", "corporate_flights_recent",
+            "patents_by_ticker", "etf_holdings_recent", "political_beta_recent",
+            "app_ratings_recent", "sec13f_holdings_recent",
+            "gov_contracts_all_recent", "congress_trading_bulk",
         ],
         "getToken": "https://www.quiverquant.com/",
     }
@@ -291,6 +330,154 @@ async def house_trading_recent(limit: Limit = DEFAULT_LIMIT) -> dict:
 async def senate_trading_recent(limit: Limit = DEFAULT_LIMIT) -> dict:
     """Recent US Senate stock trades (requires a Quiver API token)."""
     return await _fetch("senate_trading_recent", "/beta/live/senatetrading", None, limit)
+
+
+# --- Additional datasets (token-gated) -------------------------------------
+
+
+@mcp.tool()
+async def twitter_followers_recent(limit: Limit = DEFAULT_LIMIT) -> dict:
+    """Recent corporate Twitter/X follower counts across tracked tickers (requires a Quiver API token)."""
+    return await _fetch("twitter_followers_recent", "/beta/live/twitter", None, limit)
+
+
+@mcp.tool()
+async def twitter_followers_by_ticker(ticker: str, limit: Limit = DEFAULT_LIMIT) -> dict:
+    """Historical Twitter/X follower counts for one ticker (requires a Quiver API token)."""
+    return await _fetch(
+        "twitter_followers_by_ticker",
+        f"/beta/historical/twitter/{ticker.upper()}", None, limit,
+    )
+
+
+@mcp.tool()
+async def corporate_flights_recent(limit: Limit = DEFAULT_LIMIT) -> dict:
+    """Recent corporate jet flight activity (requires a Quiver API token)."""
+    return await _fetch("corporate_flights_recent", "/beta/live/flights", None, limit)
+
+
+@mcp.tool()
+async def patents_by_ticker(ticker: str, limit: Limit = DEFAULT_LIMIT) -> dict:
+    """Patent filings / momentum for one ticker (requires a Quiver API token)."""
+    return await _fetch(
+        "patents_by_ticker",
+        f"/beta/historical/allpatents/{ticker.upper()}", None, limit,
+    )
+
+
+@mcp.tool()
+async def etf_holdings_recent(limit: Limit = DEFAULT_LIMIT) -> dict:
+    """Recent ETF holdings data (requires a Quiver API token)."""
+    return await _fetch("etf_holdings_recent", "/beta/live/etfholdings", None, limit)
+
+
+@mcp.tool()
+async def political_beta_recent(limit: Limit = DEFAULT_LIMIT) -> dict:
+    """Stock sensitivity to party control (political beta) across tickers (requires a Quiver API token)."""
+    return await _fetch("political_beta_recent", "/beta/live/politicalbeta", None, limit)
+
+
+@mcp.tool()
+async def app_ratings_recent(limit: Limit = DEFAULT_LIMIT) -> dict:
+    """Recent app-store rating trends for tracked companies (requires a Quiver API token)."""
+    return await _fetch("app_ratings_recent", "/beta/live/appratings", None, limit)
+
+
+@mcp.tool()
+async def sec13f_holdings_recent(limit: Limit = DEFAULT_LIMIT) -> dict:
+    """Recent SEC 13F institutional HOLDINGS snapshot (requires a Quiver API token)."""
+    return await _fetch("sec13f_holdings_recent", "/beta/live/sec13f", None, limit)
+
+
+@mcp.tool()
+async def gov_contracts_all_recent(limit: Limit = DEFAULT_LIMIT) -> dict:
+    """Recent government contract awards across all tracked entities (requires a Quiver API token)."""
+    return await _fetch("gov_contracts_all_recent", "/beta/live/govcontractsall", None, limit)
+
+
+@mcp.tool()
+async def congress_trading_bulk(limit: Limit = DEFAULT_LIMIT) -> dict:
+    """Bulk dump of historical congressional trades (requires a Quiver API token; large response)."""
+    return await _fetch("congress_trading_bulk", "/beta/bulk/congresstrading", None, limit)
+
+
+# --- Discovery + cross-dataset composite -----------------------------------
+
+
+@mcp.tool()
+async def quiver_datasets() -> dict:
+    """List every dataset this server exposes, its endpoint, and whether it needs a Quiver API token."""
+    open_sets = [
+        {"tool": "congress_trading_recent", "path": "/beta/live/congresstrading"},
+        {"tool": "congress_trading_by_ticker", "path": "/beta/historical/congresstrading/{ticker}"},
+        {"tool": "insider_trading_recent", "path": "/beta/live/insiders"},
+    ]
+    gated = [
+        {"tool": "insider_trading_by_ticker", "path": "/beta/live/insiders?ticker="},
+        {"tool": "gov_contracts_recent", "path": "/beta/live/govcontracts"},
+        {"tool": "gov_contracts_by_ticker", "path": "/beta/historical/govcontracts/{ticker}"},
+        {"tool": "gov_contracts_all_recent", "path": "/beta/live/govcontractsall"},
+        {"tool": "lobbying_recent", "path": "/beta/live/lobbying"},
+        {"tool": "lobbying_by_ticker", "path": "/beta/historical/lobbying/{ticker}"},
+        {"tool": "wallstreetbets_recent", "path": "/beta/live/wallstreetbets"},
+        {"tool": "wallstreetbets_by_ticker", "path": "/beta/historical/wallstreetbets/{ticker}"},
+        {"tool": "offexchange_recent", "path": "/beta/live/offexchange"},
+        {"tool": "offexchange_by_ticker", "path": "/beta/historical/offexchange/{ticker}"},
+        {"tool": "sec13f_changes_recent", "path": "/beta/live/sec13fchanges"},
+        {"tool": "sec13f_holdings_recent", "path": "/beta/live/sec13f"},
+        {"tool": "house_trading_recent", "path": "/beta/live/housetrading"},
+        {"tool": "senate_trading_recent", "path": "/beta/live/senatetrading"},
+        {"tool": "twitter_followers_recent", "path": "/beta/live/twitter"},
+        {"tool": "twitter_followers_by_ticker", "path": "/beta/historical/twitter/{ticker}"},
+        {"tool": "corporate_flights_recent", "path": "/beta/live/flights"},
+        {"tool": "patents_by_ticker", "path": "/beta/historical/allpatents/{ticker}"},
+        {"tool": "etf_holdings_recent", "path": "/beta/live/etfholdings"},
+        {"tool": "political_beta_recent", "path": "/beta/live/politicalbeta"},
+        {"tool": "app_ratings_recent", "path": "/beta/live/appratings"},
+        {"tool": "congress_trading_bulk", "path": "/beta/bulk/congresstrading"},
+    ]
+    return {
+        "tokenConfigured": bool(API_TOKEN),
+        "openWithoutToken": open_sets,
+        "requiresToken": gated,
+        "totalDatasets": len(open_sets) + len(gated),
+        "getToken": "https://www.quiverquant.com/",
+    }
+
+
+@mcp.tool()
+async def ticker_signal_scan(
+    ticker: str,
+    limit_each: Annotated[int, Field(ge=1, le=200)] = 25,
+) -> dict:
+    """One-call alt-data scan for a ticker across many Quiver datasets.
+
+    Pulls congressional trades, insider Form 4, lobbying, government contracts, WallStreetBets mentions,
+    off-exchange short volume, patents and Twitter followers concurrently. Congress + insider data are open;
+    the rest require a Quiver API token and show an 'error' note when unavailable. Returns a per-signal count
+    summary plus the raw rows for each dataset.
+    """
+    t = ticker.upper()
+    specs = [
+        ("congress", f"/beta/historical/congresstrading/{t}", None),
+        ("insiders", "/beta/live/insiders", {"ticker": t}),
+        ("lobbying", f"/beta/historical/lobbying/{t}", None),
+        ("gov_contracts", f"/beta/historical/govcontracts/{t}", None),
+        ("wallstreetbets", f"/beta/historical/wallstreetbets/{t}", None),
+        ("offexchange", f"/beta/historical/offexchange/{t}", None),
+        ("patents", f"/beta/historical/allpatents/{t}", None),
+        ("twitter", f"/beta/historical/twitter/{t}", None),
+    ]
+    results = await asyncio.gather(
+        *[_fetch(name, path, params, limit_each) for name, path, params in specs]
+    )
+    signals = {}
+    summary = {}
+    for r in results:
+        name = r["dataset"]
+        signals[name] = r
+        summary[name] = "unavailable (token?)" if "error" in r else r.get("count", 0)
+    return {"ticker": t, "summary": summary, "signals": signals}
 
 
 # ---------------------------------------------------------------------------

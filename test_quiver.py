@@ -45,6 +45,13 @@ def test_status():
     print("  test_status: OK")
 
 
+def test_parse_range():
+    p = q._parse_range("$1,001 - $15,000")
+    assert p == {"amountMin": 1001.0, "amountMax": 15000.0, "amountMid": 8000.5}, p
+    assert q._parse_range("n/a") is None
+    print("  test_parse_range: OK")
+
+
 def test_tools_registered():
     names = {t.name for t in asyncio.run(q.mcp.list_tools())}
     expected = {
@@ -55,6 +62,11 @@ def test_tools_registered():
         "wallstreetbets_recent", "wallstreetbets_by_ticker",
         "offexchange_recent", "offexchange_by_ticker",
         "sec13f_changes_recent", "house_trading_recent", "senate_trading_recent",
+        "twitter_followers_recent", "twitter_followers_by_ticker",
+        "corporate_flights_recent", "patents_by_ticker", "etf_holdings_recent",
+        "political_beta_recent", "app_ratings_recent", "sec13f_holdings_recent",
+        "gov_contracts_all_recent", "congress_trading_bulk",
+        "quiver_datasets", "ticker_signal_scan",
     }
     missing = expected - names
     assert not missing, f"missing tools: {missing}"
@@ -67,5 +79,6 @@ if __name__ == "__main__":
     test_auth_headers()
     test_token_hint()
     test_status()
+    test_parse_range()
     test_tools_registered()
     print("ALL TESTS PASSED")

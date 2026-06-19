@@ -4,6 +4,25 @@ All notable changes to this project are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-06-19
+
+### Added
+- 10 additional dataset tools: `twitter_followers_recent` / `_by_ticker`,
+  `corporate_flights_recent`, `patents_by_ticker`, `etf_holdings_recent`,
+  `political_beta_recent`, `app_ratings_recent`, `sec13f_holdings_recent`,
+  `gov_contracts_all_recent`, and `congress_trading_bulk`.
+- `quiver_datasets` — lists every dataset this server exposes, its endpoint, and
+  whether it needs an API token.
+- `ticker_signal_scan` — one call that fans out across many per-ticker datasets
+  concurrently (congress, insiders, lobbying, contracts, WSB, off-exchange,
+  patents, Twitter) and returns a per-signal count summary plus raw rows.
+- Automatic dollar-`Range` normalization: rows like `$1,001 - $15,000` gain numeric
+  `amountMin` / `amountMax` / `amountMid` fields.
+- 60-second in-memory response cache so repeated/fanned-out calls share fetches.
+
+### Changed
+- 28 tools total (up from 16). `quiver_status` now lists the new gated datasets.
+
 ## [0.1.0] - 2026-06-19
 
 ### Added
